@@ -36,7 +36,9 @@ services:
       # container recreate does not silently remove installed serve engines.
       - ${APP_DATA_DIR:-./data}/local:/app/.local:z
       # Claude Code CLI / Codex CLI login state (`claude login` / `codex
-      # login`, run once via `docker compose exec odysseus <cli> login`).
+      # login`, run once via `docker compose exec --user odysseus odysseus
+      # <cli> login` — the --user matters: a bare `exec` runs as root
+      # (HOME=/root), not this mount's owner).
       # Only used if you configure a "Claude Code CLI" / "Codex CLI" model
       # endpoint in Settings — see .env.example.
       - ${CLAUDE_CONFIG_HOST_DIR:-./data/claude}:/app/.claude:z
