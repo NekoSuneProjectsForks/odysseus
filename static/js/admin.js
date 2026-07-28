@@ -809,6 +809,18 @@ function initEndpointForm() {
   const pickerCurrent = picker ? picker.querySelector('.adm-provider-current') : null;
   const DEVICE_AUTH_PROVIDER_VALUES = new Set(Object.keys(PROVIDER_DEVICE_FLOWS));
   let deviceAuthPolling = false;
+  // Claude Code CLI / Codex CLI: no HTTP endpoint and no API key at all — the
+  // real `claude`/`codex` binary authenticates itself via `claude login` /
+  // `codex login` run once in the container (see src/claude_cli.py,
+  // src/codex_cli.py). Not a device-auth flow (nothing for Odysseus to poll),
+  // just a locked sentinel URL with the key field disabled.
+  const KEYLESS_CLI_PROVIDERS = {
+    'http://claude-code-cli.local': 'Claude Code CLI uses `claude login` in the container — no API key needed',
+    'http://codex-cli.local': 'Codex CLI uses `codex login` in the container — no API key needed',
+  };
+  function _isKeylessCliSelected() {
+    return Object.prototype.hasOwnProperty.call(KEYLESS_CLI_PROVIDERS, provider.value);
+  }
   function _selectedProviderOption() {
     return provider && provider.selectedOptions ? provider.selectedOptions[0] : null;
   }
@@ -856,6 +868,30 @@ function initEndpointForm() {
         msg.textContent = '';
         msg.className = '';
       }
+    } else if (_isKeylessCliSelected()) {
+      urlInput.readOnly = true;
+      if (apiKey) {
+        apiKey.value = '';
+        apiKey.placeholder = KEYLESS_CLI_PROVIDERS[provider.value];
+        apiKey.disabled = true;
+      }
+      if (testBtn) {
+        testBtn.disabled = true;
+        testBtn.style.opacity = '0.45';
+        testBtn.style.cursor = 'not-allowed';
+      }
+      if (addBtn) {
+        addBtn.disabled = false;
+        addBtn.textContent = 'Add';
+        addBtn.style.width = '55px';
+        addBtn.style.display = '';
+      }
+      if (kindSel) kindSel.value = 'api';
+      if (msg) {
+        msg.textContent = '';
+        msg.className = '';
+      }
+      if (!deviceAuthPolling && status) status.textContent = '';
     } else {
       urlInput.placeholder = 'Base URL or pick provider';
       urlInput.readOnly = false;
@@ -1045,7 +1081,7 @@ function initEndpointForm() {
       const rawUrl = (urlInput.value || provider.value).trim();
       const apiKey = el('adm-epApiKey').value.trim();
       if (!rawUrl) { msg.textContent = 'Select a provider or enter a base URL'; msg.className = 'admin-error'; return; }
-      if (provider.value && !apiKey) { msg.textContent = 'API key is required for cloud providers'; msg.className = 'admin-error'; return; }
+      if (provider.value && !apiKey && !_isKeylessCliSelected()) { msg.textContent = 'API key is required for cloud providers'; msg.className = 'admin-error'; return; }
       const url = provider.value && rawUrl === provider.value ? rawUrl : _normalizeBaseUrl(rawUrl);
       apiTestController = new AbortController();
       apiTestBtn.disabled = true;

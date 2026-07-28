@@ -222,6 +222,19 @@ class Session(TimestampMixin, Base):
     mode = Column(String, nullable=True)  # 'agent', 'chat', or 'research'
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
 
+    # Claude Code CLI session continuation. The CLI's own `--resume <id>` only
+    # produces a coherent conversation when re-invoked from the SAME working
+    # directory it started in, so we pin both together — a workspace change
+    # (or a session that has never talked to the claude-cli provider) means
+    # `claude_cli_session_id` is not valid to resume and a fresh CLI session
+    # is started instead.
+    claude_cli_session_id = Column(String, nullable=True, default=None)
+    claude_cli_cwd = Column(String, nullable=True, default=None)
+
+    # Same idea for the Codex CLI provider (`codex exec resume <thread_id>`).
+    codex_cli_session_id = Column(String, nullable=True, default=None)
+    codex_cli_cwd = Column(String, nullable=True, default=None)
+
     # Relationship to chat messages
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
     
@@ -2019,6 +2032,31 @@ def init_db():
     _migrate_encrypt_signatures()
     _migrate_encrypt_endpoint_keys()
     _migrate_backfill_task_folders()
+    _migrate_add_claude_cli_session_columns()
+
+
+def _migrate_add_claude_cli_session_columns():
+    """Add claude_cli_session_id/claude_cli_cwd/codex_cli_* columns to sessions if missing."""
+    import sqlite3
+    db_path = DATABASE_URL.replace("sqlite:///", "")
+    if not os.path.exists(db_path):
+        return
+    conn = None
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.execute("PRAGMA table_info(sessions)")
+        columns = [row[1] for row in cursor.fetchall()]
+        for col in ("claude_cli_session_id", "claude_cli_cwd", "codex_cli_session_id", "codex_cli_cwd"):
+            if columns and col not in columns:
+                conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT")
+        conn.commit()
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"claude_cli/codex_cli session columns migration failed: {e}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def _migrate_backfill_task_folders():

@@ -960,6 +960,14 @@ def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> Lis
         if api_key:
             return fetch_available_models(api_key, timeout=timeout)
         return []
+    if provider == "claude-cli":
+        # Subprocess provider, no /models endpoint to hit — the CLI's own
+        # model aliases (see src/claude_cli.py) are the whole list.
+        from src.claude_cli import CLAUDE_CLI_MODELS
+        return list(CLAUDE_CLI_MODELS)
+    if provider == "codex-cli":
+        from src.codex_cli import CODEX_CLI_MODELS
+        return list(CODEX_CLI_MODELS)
     if _is_google_api_base(base):
         try:
             models = _probe_google_models(base, api_key, timeout=timeout)

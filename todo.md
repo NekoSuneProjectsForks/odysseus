@@ -238,6 +238,58 @@ entire existing tool suite rather than building a parallel one.
   ...)` resolves the model for that turn only — the session's own model
   selection is never mutated. No new resolver code needed; `resolve_endpoint`
   already generalizes over a `setting_prefix`.
+- [x] Claude Code CLI / Codex CLI as selectable AI Model endpoints — built.
+  Explicitly **not** the OAuth-token-reuse shortcut that was asked for and
+  declined earlier in this project's history — Odysseus shells out to the
+  real `claude` / `codex` binaries (`src/claude_cli.py`, `src/codex_cli.py`),
+  which authenticate themselves via their own `claude login` / `codex login`
+  (or an API key) exactly as they would from an interactive terminal.
+  Odysseus never touches that OAuth flow or its tokens.
+  - Both fit the existing per-provider-branch pattern in `src/llm_core.py`
+    via a sentinel "base URL" that's never actually dialed
+    (`http://claude-code-cli.local`, `http://codex-cli.local`) —
+    `_detect_provider()` recognizes them, and a new `_stream_cli_provider()`
+    helper shells out to the subprocess and translates its own JSON event
+    stream into Odysseus's internal SSE vocabulary (`delta`/`usage`/`error`/
+    `[DONE]`). Wired into both the streaming (`_stream_llm_inner`) and
+    non-streaming (`llm_call_async`) paths, plus `list_model_ids` (returns
+    each CLI's model aliases — `sonnet`/`opus`/`haiku`/`opusplan` for Claude
+    Code, `gpt-5.5`/`gpt-5.4`/`gpt-5.4-mini` for Codex — since neither CLI
+    exposes a live `/v1/models`-style discovery endpoint).
+  - Session continuation: new `claude_cli_session_id`/`claude_cli_cwd` and
+    `codex_cli_session_id`/`codex_cli_cwd` columns on `sessions`
+    (`core/database.py`). Each CLI's own `--resume`/`exec resume` only
+    produces a coherent conversation when re-invoked from the SAME cwd it
+    started in, so the resume id is only reused when the stored cwd matches
+    the active workspace — otherwise a fresh CLI session starts.
+  - Tool/permission scoping differs by mode: with an active Odysseus
+    workspace (the GitHub-workspace coding-agent path), the CLI is allowed
+    its own file/bash tools scoped to that same cwd
+    (`--allowedTools ... --permission-mode acceptEdits` /
+    `--sandbox workspace-write --ask-for-approval never`) so it can act as
+    the primary coding engine. With no workspace (plain chat), all CLI tool
+    use is denied (`--allowedTools ""` / `--sandbox read-only`) so Odysseus's
+    own tool security/sandboxing stays the only tool-execution surface.
+  - Docker: both CLIs install as npm globals behind the existing
+    `INSTALL_OPTIONAL` build arg (`Dockerfile`); each CLI's login state
+    persists via its own bind mount (`CLAUDE_CONFIG_HOST_DIR` →
+    `/app/.claude`, `CODEX_CONFIG_HOST_DIR` → `/app/.codex`, matching the
+    container's `HOME=/app`) across all three compose files. One-time setup
+    is `docker compose exec odysseus claude login` / `codex login` — see
+    `.env.example`.
+  - UI: "Claude Code CLI" / "Codex CLI" entries in the Add Model provider
+    picker (`static/index.html`, `static/js/admin.js`) — picking one locks
+    the URL to the sentinel and disables the API key field (no key needed),
+    which required a small carve-out in the picker's "API key required for
+    cloud providers" validation and in `routes/model_routes.py`'s
+    `_probe_endpoint()` (returns the static alias list instead of trying to
+    reach a fake host).
+  - Known v1 limitation: Codex's `exec --json` event schema reports whole
+    completed items (`item.completed` / `agent_message`) rather than
+    per-token deltas the way Claude Code's `--include-partial-messages` does,
+    so Codex CLI responses currently arrive in one chunk instead of
+    streaming character-by-character. Functionally fine, just a coarser
+    streaming experience than the other providers.
 
 ## 5. VRChat Integration ("VRCX-like")
 

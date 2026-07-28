@@ -78,6 +78,16 @@ COPY requirements.txt requirements-optional.txt ./
 RUN pip install --no-cache-dir -r requirements.txt \
     && if [ "$INSTALL_OPTIONAL" = "true" ]; then pip install --no-cache-dir -r requirements-optional.txt; fi
 
+# Official Claude Code CLI + OpenAI Codex CLI (npm globals, use the Node
+# already installed above for the Browser MCP server's npx). Both are opt-in
+# behind INSTALL_OPTIONAL: unused unless an admin configures the matching
+# "Claude Code CLI" / "Codex CLI" model endpoint in Settings and runs
+# `claude login` / `codex login` (see src/claude_cli.py, src/codex_cli.py —
+# Odysseus shells out to these binaries and never touches their OAuth flow).
+RUN if [ "$INSTALL_OPTIONAL" = "true" ]; then \
+      npm install -g @anthropic-ai/claude-code @openai/codex; \
+    fi
+
 # python-magic powers content-based MIME sniffing in src/upload_handler.py.
 # Image-only (not in requirements.txt) because it needs the libmagic1 system
 # lib installed above; see the apt note near the top of this stage.

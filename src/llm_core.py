@@ -855,6 +855,12 @@ def _detect_provider(url: str) -> str:
     """
     if _is_ollama_native_url(url):
         return "ollama"
+    from src.claude_cli import is_claude_cli_base
+    if is_claude_cli_base(url):
+        return "claude-cli"
+    from src.codex_cli import is_codex_cli_base
+    if is_codex_cli_base(url):
+        return "codex-cli"
     if _host_match(url, "anthropic.com"):
         return "anthropic"
     if _host_match(url, "opencode.ai/zen/go"):
@@ -1729,6 +1735,12 @@ def list_model_ids(
     provider = _detect_provider(base_chat_url)
     if provider == "anthropic":
         return list(ANTHROPIC_MODELS)
+    if provider == "claude-cli":
+        from src.claude_cli import CLAUDE_CLI_MODELS
+        return list(CLAUDE_CLI_MODELS)
+    if provider == "codex-cli":
+        from src.codex_cli import CODEX_CLI_MODELS
+        return list(CODEX_CLI_MODELS)
     try:
         h = {}
         if headers:
@@ -1982,10 +1994,11 @@ async def llm_call_async(
         logger.debug(f"Returning cached response for key: {cache_key}")
         return cached_response
 
-    if provider == "chatgpt-subscription":
-        # ChatGPT/Codex requires streamed Responses requests even for callers
-        # that want a plain string (auto-title, memory extraction, etc.).
-        # Reuse stream_llm's validated Codex SSE path and collect deltas.
+    if provider in ("chatgpt-subscription", "claude-cli", "codex-cli"):
+        # These providers have no plain request/response shape (Codex Responses
+        # API requires streaming; claude-cli/codex-cli are subprocesses that
+        # only speak their own event stream) — reuse stream_llm's validated
+        # SSE path for all of them and collect deltas into a single string.
         parts: List[str] = []
         async for chunk in stream_llm(
             url,
@@ -2125,6 +2138,10 @@ def _stream_target_url(url: str) -> str:
         return _normalize_ollama_url(url)
     if provider == "chatgpt-subscription":
         return _normalize_chatgpt_subscription_url(url)
+    if provider in ("claude-cli", "codex-cli"):
+        # Sentinel URL, never dialed — the subprocess branches in
+        # _stream_llm_inner short-circuit before any HTTP request is built.
+        return url
     return _normalize_openai_chat_url(url)
 
 
@@ -2149,6 +2166,60 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             tool_choice_none=tool_choice_none,
         ):
             yield chunk
+
+
+async def _stream_cli_provider(provider: str, model: str, messages: List[Dict], session_id: Optional[str]):
+    """Shared driver for the claude-cli / codex-cli subprocess providers.
+
+    Both run a real CLI binary out-of-process (see src/claude_cli.py and
+    src/codex_cli.py for the "why this is fine" rationale) and emit their own
+    JSON event stream; this translates that into the internal SSE vocabulary
+    the rest of llm_core/agent_loop already understand, and persists whatever
+    resume/session id the CLI reports so the next turn in the same workspace
+    can continue the same underlying conversation instead of starting cold.
+    """
+    from src.tool_execution import get_active_workspace
+    workspace = get_active_workspace()
+
+    if provider == "claude-cli":
+        from src.claude_cli import stream_claude_cli, get_resume_session_id, save_resume_session_id
+        stream_fn = stream_claude_cli
+    else:
+        from src.codex_cli import stream_codex_cli, get_resume_session_id, save_resume_session_id
+        stream_fn = stream_codex_cli
+
+    resume_id = get_resume_session_id(session_id, workspace)
+    degenerate_guard = _DegenerateStreamGuard(model)
+    input_tokens = 0
+    output_tokens = 0
+    saw_usage = False
+
+    async for event in stream_fn(messages=messages, model=model, workspace=workspace, resume_session_id=resume_id):
+        etype = event.get("type")
+        if etype == "session_id":
+            save_resume_session_id(session_id, workspace, event.get("id") or "")
+        elif etype == "delta":
+            text = event.get("text") or ""
+            thinking = bool(event.get("thinking"))
+            if text and not thinking:
+                degenerate = degenerate_guard.check(text)
+                if degenerate:
+                    yield degenerate
+                    return
+            if text:
+                yield _stream_delta_event(text, thinking=thinking)
+        elif etype == "usage":
+            saw_usage = True
+            input_tokens = event.get("input_tokens", 0) or input_tokens
+            output_tokens = event.get("output_tokens", 0) or output_tokens
+        elif etype == "error":
+            yield f'event: error\ndata: {json.dumps({"error": event.get("message") or "CLI provider error", "status": 502})}\n\n'
+            return
+        elif etype == "done":
+            if saw_usage:
+                yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": input_tokens, "output_tokens": output_tokens}})}\n\n'
+            yield "data: [DONE]\n\n"
+            return
 
 
 async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
@@ -2180,6 +2251,13 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         messages_copy = [{"role": "system", "content": "\n\n".join(sys_parts)}] + non_sys
     else:
         messages_copy = non_sys
+
+    # ── Claude Code CLI / Codex CLI: no HTTP request at all — shell out to the
+    # real CLI binary and translate its own event stream into this vocabulary.
+    if provider in ("claude-cli", "codex-cli"):
+        async for chunk in _stream_cli_provider(provider, model, messages_copy, session_id):
+            yield chunk
+        return
 
     if provider == "anthropic":
         target_url = _normalize_anthropic_url(url)
