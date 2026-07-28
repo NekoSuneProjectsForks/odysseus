@@ -855,6 +855,23 @@ app.include_router(setup_claude_routes())
 from routes.vault_routes import setup_vault_routes
 app.include_router(setup_vault_routes())
 
+# GitHub integration — clone/create repos, commit, push, open PRs. Admin-only
+# (see THREAT_MODEL.md); todo.md §2/§7.
+from routes.github_routes import setup_github_routes
+app.include_router(setup_github_routes())
+
+# Discord bot integration — read message history, member counts/presence, send
+# messages. Admin-only; optional dependency (discord.py), degrades gracefully
+# if not installed. todo.md §1/§7.
+from routes.discord_routes import setup_discord_routes
+app.include_router(setup_discord_routes())
+
+# Self-hosted image backend discovery (checkpoint/LoRA lists for A1111/SD.Next/
+# ComfyUI) — proxied server-side so the browser never talks to the admin's
+# internal image-gen server directly. todo.md §3.
+from routes.image_backend_routes import setup_image_backend_routes
+app.include_router(setup_image_backend_routes())
+
 # Contacts (CardDAV)
 from routes.contacts.contacts_routes import setup_contacts_routes
 app.include_router(setup_contacts_routes())
@@ -1055,6 +1072,17 @@ async def _startup_event():
             logger.warning(f"MCP startup failed (non-critical): {type(e).__name__}: {e}")
 
     _startup_tasks.append(asyncio.create_task(_startup_mcp_connections()))
+
+    # Discord bot — no-op if unconfigured/disabled/discord.py not installed;
+    # failures are logged, never raised (see DiscordBotService.start).
+    async def _startup_discord_bot():
+        try:
+            from services.discord.service import get_discord_service
+            await get_discord_service().start()
+        except Exception as e:
+            logger.warning(f"Discord bot startup failed (non-critical): {type(e).__name__}: {e}")
+
+    _startup_tasks.append(asyncio.create_task(_startup_discord_bot()))
 
     # Startup warmups are opt-in. They make later requests a little warmer, but
     # they also compete with the first seconds of real UI use on slow or busy
@@ -1269,6 +1297,12 @@ async def _shutdown_event():
         await mcp_manager.disconnect_all()
     except Exception as e:
         logger.warning(f"MCP shutdown error: {e}")
+    # Stop the Discord bot (no-op if it was never started)
+    try:
+        from services.discord.service import get_discord_service
+        await get_discord_service().stop()
+    except Exception as e:
+        logger.warning(f"Discord bot shutdown error: {e}")
     logger.info("Application shutdown complete")
 
 

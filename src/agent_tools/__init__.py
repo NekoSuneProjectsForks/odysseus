@@ -33,6 +33,8 @@ from .admin_tools import (
     do_manage_endpoints, do_manage_mcp, do_manage_webhooks,
     do_manage_tokens, do_manage_settings,
 )
+from .github_tools import GITHUB_TOOL_HANDLERS, do_manage_github
+from .discord_tools import DISCORD_TOOL_HANDLERS, do_manage_discord
 
 TOOL_HANDLERS = {
     "bash": BashTool().execute,
@@ -66,6 +68,10 @@ TOOL_HANDLERS = {
 }
 # Config/integration admin tools (manage_endpoints/mcp/webhooks/tokens/settings).
 TOOL_HANDLERS.update(ADMIN_TOOL_HANDLERS)
+# GitHub integration (clone/create repos, commit, push, PRs) — admin-only.
+TOOL_HANDLERS.update(GITHUB_TOOL_HANDLERS)
+# Discord bot (history search, member/presence, send message) — admin-only.
+TOOL_HANDLERS.update(DISCORD_TOOL_HANDLERS)
 
 # ---------------------------------------------------------------------------
 # Constants (re-exported for backward compatibility — single source of truth
@@ -90,7 +96,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "suggest_document",
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",
-             "manage_notes", "manage_calendar",
+             "manage_notes", "manage_calendar", "manage_github", "manage_discord",
              "resolve_contact", "manage_contact",
              # Email tool names come from BUILTIN_EMAIL_TOOLS (unioned below)
              # so the fence regex, dispatch, and non-admin blocklist all cover

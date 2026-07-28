@@ -558,6 +558,53 @@ class ApiToken(TimestampMixin, Base):
     last_used_at = Column(DateTime, nullable=True)
 
 
+class GithubAccount(TimestampMixin, Base):
+    """One connected GitHub OAuth App account. Admin-only feature (see
+    THREAT_MODEL.md) — access/refresh tokens are as sensitive as an admin
+    password since they can create repos and push code on the user's behalf.
+    Tokens stored Fernet-encrypted at rest via EncryptedText."""
+    __tablename__ = "github_accounts"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    login = Column(String, nullable=True)          # GitHub username
+    avatar_url = Column(String, nullable=True)
+    access_token = Column(EncryptedText, nullable=True)
+    token_scope = Column(String, nullable=True)     # scopes granted, comma-separated (from GitHub's response header)
+    connected_at = Column(DateTime, nullable=True)
+
+
+class GithubRepo(TimestampMixin, Base):
+    """A repo Odysseus is tracking locally: either cloned from GitHub or
+    created fresh through the integration. `local_path` lives under
+    GITHUB_REPOS_DIR; git operations (status/diff/commit/push) run there."""
+    __tablename__ = "github_repos"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    full_name = Column(String, nullable=False)      # "user/repo"
+    remote_url = Column(String, nullable=False)      # https clone URL (token injected at call time, never stored here)
+    local_path = Column(String, nullable=False)
+    default_branch = Column(String, nullable=False, default="main")
+    private = Column(Boolean, default=True)
+    origin = Column(String, nullable=False, default="cloned")  # "cloned" | "created" | "uploaded"
+
+
+class DiscordConfig(TimestampMixin, Base):
+    """Discord bot configuration. Admin-only feature (see THREAT_MODEL.md) —
+    a bot token grants read access to message content and member presence in
+    every server the bot has been invited to, so it is stored encrypted at
+    rest and gated the same way as the GitHub OAuth token. Single shared row
+    (one bot per instance), same pattern as other admin-singleton config."""
+    __tablename__ = "discord_config"
+
+    id = Column(String, primary_key=True, index=True)
+    owner = Column(String, nullable=True, index=True)
+    bot_token = Column(EncryptedText, nullable=True)
+    default_guild_id = Column(String, nullable=True)
+    enabled = Column(Boolean, default=False, nullable=False)
+
+
 class Webhook(TimestampMixin, Base):
     """Outgoing webhooks fired on events."""
     __tablename__ = "webhooks"

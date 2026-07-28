@@ -840,6 +840,68 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "manage_github",
+            "description": "Manage the GitHub integration: check connect status, list tracked/remote repos, create a new GitHub repo (clones it locally), clone an existing repo, upload an existing local project as a new repo, and — for a tracked repo — check status/diff, commit, push, create a branch, open a pull request, or check PR CI status. Admin-only. Requires a connected GitHub account (Settings > Integrations > GitHub).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "status", "list_repos", "list_remote_repos",
+                            "create_repo", "clone_repo", "upload_repo", "delete_repo",
+                            "repo_status", "repo_diff", "commit", "push",
+                            "create_branch", "create_pr", "checks",
+                        ],
+                    },
+                    "repo_id": {"type": "string", "description": "Tracked repo id (from list_repos) — required for repo_status/repo_diff/commit/push/create_branch/create_pr/checks/delete_repo"},
+                    "name": {"type": "string", "description": "Repo name (for create_repo/upload_repo)"},
+                    "description": {"type": "string", "description": "Repo description (for create_repo/upload_repo)"},
+                    "private": {"type": "boolean", "description": "Create as private (for create_repo/upload_repo, default true)"},
+                    "org": {"type": "string", "description": "Create under this GitHub org instead of the user account (for create_repo/upload_repo)"},
+                    "full_name_or_url": {"type": "string", "description": "'owner/repo' or a full GitHub URL (for clone_repo)"},
+                    "branch": {"type": "string", "description": "Branch to clone (for clone_repo, defaults to the repo's default branch)"},
+                    "local_path": {"type": "string", "description": "Existing local directory to turn into a new GitHub repo (for upload_repo)"},
+                    "delete_files": {"type": "boolean", "description": "Also delete the local working copy (for delete_repo, default false)"},
+                    "message": {"type": "string", "description": "Commit message (for commit)"},
+                    "branch_name": {"type": "string", "description": "New branch name to check out (for create_branch)"},
+                    "title": {"type": "string", "description": "Pull request title (for create_pr)"},
+                    "body": {"type": "string", "description": "Pull request description (for create_pr)"},
+                    "base": {"type": "string", "description": "Base branch for the PR (for create_pr, defaults to the repo's default branch)"},
+                    "ref": {"type": "string", "description": "Commit SHA to check CI status for (for checks, defaults to HEAD)"},
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_discord",
+            "description": "Manage the Discord bot integration: check connect status, list guilds the bot is in, get a guild's member count and online/idle/dnd/offline breakdown, list members with status, list text channels, search message history by keyword, and send a message. Admin-only. Requires a configured and enabled Discord bot (Settings > Integrations > Discord Bot) with the Message Content and Server Members privileged intents enabled.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "status", "list_guilds", "guild_summary", "list_members",
+                            "list_channels", "search_messages", "send_message",
+                        ],
+                    },
+                    "guild_id": {"type": "string", "description": "Discord guild (server) id — omit to use the configured default guild"},
+                    "channel_id": {"type": "string", "description": "Discord channel id (required for send_message; optional for search_messages to scope to one channel)"},
+                    "query": {"type": "string", "description": "Keyword to search for in message content (for search_messages, empty matches everything)"},
+                    "content": {"type": "string", "description": "Message text to send (for send_message)"},
+                    "limit": {"type": "integer", "description": "Max results (for list_members/search_messages)"},
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "download_model",
             "description": "Download a HuggingFace model to a server. If `host` is omitted, defaults to the cookbook's currently-selected server (NOT localhost) — call list_cookbook_servers first if you're unsure where it should go.",
             "parameters": {
@@ -1579,7 +1641,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = action
     elif tool_type in ("manage_tasks", "manage_skills", "api_call",
                         "manage_endpoints", "manage_mcp", "manage_webhooks",
-                        "manage_tokens", "manage_documents", "manage_settings"):
+                        "manage_tokens", "manage_documents", "manage_settings",
+                        "manage_github", "manage_discord"):
         content = json.dumps(args)
     elif tool_type == "ask_teacher":
         content = args.get("model", "auto") + "\n" + args.get("problem", "")

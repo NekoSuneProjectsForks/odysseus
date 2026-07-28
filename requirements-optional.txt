@@ -34,3 +34,11 @@ PyMuPDF
 # [all]/Azure/audio extras (cloud + heavy). Pinned to a release >30 days old per
 # the dependency-age discussion in issue #485.
 markitdown[docx,pptx,xlsx,xls]==0.1.6
+
+# Discord bot integration (Settings > Integrations > Discord Bot — admin only).
+# Reads message history, member counts, and online presence; can send
+# messages. Requires enabling the "Message Content" and "Server Members"
+# privileged intents on the bot in the Discord Developer Portal. Lazy-imported
+# via services/discord/service.py — the app boots fine without it, and the
+# admin panel shows a clear "install to enable" message until it's installed.
+discord.py>=2.3,<3

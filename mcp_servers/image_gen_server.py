@@ -20,6 +20,33 @@ from src.constants import GENERATED_IMAGES_DIR
 
 server = Server("image_gen")
 
+_MAX_INIT_IMAGE_BYTES = 20_000_000  # 20MB — same ballpark as WEB_FETCH_HARD_MAX_BYTES
+
+
+async def _fetch_init_image(url_or_path: str) -> bytes:
+    """Resolve an img2img source: a relative `/api/generated-image/...` path
+    (our own gallery) is fetched over the internal loopback base; anything
+    else is treated as an absolute URL and SSRF-checked before fetching."""
+    import httpx
+    from src.constants import internal_api_base
+
+    if url_or_path.startswith("/"):
+        full_url = internal_api_base().rstrip("/") + url_or_path
+    else:
+        from src.url_safety import check_outbound_url
+        ok, reason = check_outbound_url(url_or_path)
+        if not ok:
+            raise ValueError(f"URL rejected: {reason}")
+        full_url = url_or_path
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(full_url)
+    if resp.status_code != 200:
+        raise ValueError(f"HTTP {resp.status_code} fetching {url_or_path}")
+    if len(resp.content) > _MAX_INIT_IMAGE_BYTES:
+        raise ValueError(f"Image too large ({len(resp.content)} bytes, max {_MAX_INIT_IMAGE_BYTES})")
+    return resp.content
+
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
@@ -34,6 +61,9 @@ async def list_tools() -> list[Tool]:
                     "model": {"type": "string", "description": "Model name (auto-detects if omitted)"},
                     "size": {"type": "string", "description": "Image size (default 1024x1024)"},
                     "quality": {"type": "string", "description": "Quality: low, medium, high, auto (default medium)"},
+                    "negative_prompt": {"type": "string", "description": "Things to avoid in the image. Only used by self-hosted backends (Automatic1111/SD.Next/ComfyUI) — ignored on the OpenAI-compatible path."},
+                    "input_image_url": {"type": "string", "description": "URL or Odysseus /api/generated-image/... path of an image to use as a starting point (image-to-image). Only supported by self-hosted backends — ignored on the OpenAI-compatible path."},
+                    "strength": {"type": "number", "description": "For input_image_url: how much to change the source image, 0-1 (default 0.75). Lower keeps more of the original."},
                 },
                 "required": ["prompt"],
             },
@@ -50,6 +80,13 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     model_spec = arguments.get("model", "")
     size = arguments.get("size", "1024x1024")
     quality = arguments.get("quality", "medium")
+    negative_prompt = arguments.get("negative_prompt", "")
+    input_image_url = arguments.get("input_image_url", "")
+    strength = arguments.get("strength", 0.75)
+    try:
+        strength = max(0.0, min(1.0, float(strength)))
+    except (TypeError, ValueError):
+        strength = 0.75
 
     if not prompt:
         return [TextContent(type="text", text="Error: Image prompt is required")]
@@ -63,6 +100,59 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             return [TextContent(type="text", text="Error: Image generation is disabled by the administrator.")]
 
         _settings = load_settings()
+
+        _backend = _settings.get("image_backend", "openai") or "openai"
+        if _backend in ("automatic1111", "sdnext", "comfyui"):
+            from src.image_backends import generate_image_self_hosted, ImageBackendError
+
+            init_image_bytes = None
+            if input_image_url:
+                try:
+                    init_image_bytes = await _fetch_init_image(input_image_url)
+                except Exception as e:
+                    return [TextContent(type="text", text=f"Error: Could not load input_image_url: {e}")]
+
+            try:
+                image_bytes = await generate_image_self_hosted(
+                    _backend, prompt, _settings,
+                    negative_prompt=negative_prompt,
+                    init_image_bytes=init_image_bytes,
+                    denoising_strength=strength,
+                )
+            except ImageBackendError as e:
+                return [TextContent(type="text", text=f"Error: {e}")]
+            except Exception as e:
+                return [TextContent(type="text", text=f"Error: Image generation failed: {e}")]
+
+            img_dir = Path(GENERATED_IMAGES_DIR)
+            img_dir.mkdir(parents=True, exist_ok=True)
+            filename = f"{uuid.uuid4().hex[:12]}.png"
+            (img_dir / filename).write_bytes(image_bytes)
+            _pub_base = (get_setting("app_public_url", "") or "").rstrip("/")
+            image_url = f"{_pub_base}/api/generated-image/{filename}"
+
+            try:
+                from src.database import SessionLocal, GalleryImage
+                db = SessionLocal()
+                db.add(GalleryImage(
+                    id=str(uuid.uuid4()),
+                    filename=filename,
+                    prompt=prompt,
+                    model=_backend,
+                    size=size,
+                    quality=quality,
+                ))
+                db.commit()
+                db.close()
+            except Exception:
+                pass
+
+            result = (
+                f"Generated image for: {prompt[:100]}\n"
+                f"Direct link: {image_url}\n"
+                f"model: {_backend}\nsize: {size}"
+            )
+            return [TextContent(type="text", text=result)]
 
         if not model_spec:
             model_spec = _settings.get("image_model", "")

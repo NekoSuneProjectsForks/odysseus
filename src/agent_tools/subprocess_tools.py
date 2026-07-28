@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -7,6 +8,8 @@ import time
 import collections
 from typing import Optional, Callable, Awaitable, Tuple, Dict
 from src.constants import MAX_OUTPUT_CHARS
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour
 DEFAULT_PYTHON_TIMEOUT = 60 * 60
@@ -274,12 +277,45 @@ async def _run_subprocess_streaming(
 
 class BashTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import agent_cwd, _truncate
+        from src.tool_execution import agent_cwd, get_active_workspace, _truncate
         if isinstance(content, dict):
             content = str(content.get("command") or content.get("cmd") or content.get("code") or "")
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
         session_id = ctx.get("session_id")
+
+        # Opt-in Docker sandbox: when a workspace is active and the admin has
+        # enabled it in Settings > Agent, run this command inside a container
+        # bind-mounting the workspace instead of directly on the host. See
+        # src/bash_sandbox.py and todo.md §4. Falls through to the normal
+        # (unsandboxed) path if disabled, no workspace, or Docker unreachable.
+        _workspace = get_active_workspace()
+        if _workspace:
+            try:
+                from src.settings import get_setting
+            except Exception:
+                get_setting = None
+            if get_setting and get_setting("bash_sandbox_enabled", False):
+                from src.bash_sandbox import is_docker_available, ensure_container, exec_in_container, SandboxError
+                if await is_docker_available():
+                    try:
+                        container = await ensure_container(_workspace)
+                        stdout, stderr, rc = await exec_in_container(container, content, timeout=DEFAULT_BASH_TIMEOUT)
+                    except SandboxError as e:
+                        return {"error": f"bash (sandboxed): {e}", "exit_code": 1}
+                    if rc == 124 and not stdout and not stderr:
+                        return {"error": f"bash (sandboxed): timed out after {DEFAULT_BASH_TIMEOUT}s", "exit_code": 124}
+                    output = stdout.rstrip()
+                    err = stderr.rstrip()
+                    if err:
+                        output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
+                    return {
+                        "output": _truncate(output, MAX_OUTPUT_CHARS) or "(no output)",
+                        "exit_code": rc or 0,
+                        "sandboxed": True,
+                    }
+                logger.warning("bash_sandbox_enabled is on but Docker is unreachable; running unsandboxed")
+
         if session_id and shutil.which("tmux"):
             stdout, stderr, rc, timed_out = await _run_tmux_bash(
                 content,

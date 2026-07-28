@@ -1693,11 +1693,32 @@ def setup_chat_routes(
                     elif _explicit_browser_intent:
                         _forced_tools = set(_BROWSER_MCP_TOOLS)
 
+                    # Coding model routing: when a workspace is active (the user is
+                    # working in a cloned/created repo — see GitHub integration),
+                    # route this turn through the admin-configured "coding model"
+                    # instead of the session's regular chat model, if one is set.
+                    # Per-turn only — the session's own model selection is untouched.
+                    _turn_endpoint_url, _turn_model, _turn_headers = sess.endpoint_url, sess.model, sess.headers
+                    if workspace:
+                        try:
+                            from src.endpoint_resolver import resolve_endpoint
+                            _coding_url, _coding_model, _coding_headers = resolve_endpoint(
+                                "coding",
+                                fallback_url=sess.endpoint_url,
+                                fallback_model=sess.model,
+                                fallback_headers=sess.headers,
+                                owner=_user,
+                            )
+                            if _coding_url and _coding_model:
+                                _turn_endpoint_url, _turn_model, _turn_headers = _coding_url, _coding_model, _coding_headers
+                        except Exception:
+                            logger.debug("Coding model resolution failed; using session model", exc_info=True)
+
                     async for chunk in stream_agent_loop(
-                        sess.endpoint_url,
-                        sess.model,
+                        _turn_endpoint_url,
+                        _turn_model,
                         messages,
-                        headers=sess.headers,
+                        headers=_turn_headers,
                         temperature=ctx.preset.temperature,
                         max_tokens=ctx.preset.max_tokens,
                         prompt_type=preset_id,

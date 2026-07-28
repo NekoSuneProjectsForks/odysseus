@@ -639,6 +639,94 @@ async function initUtilityModel() {
   });
 }
 
+/* ── Coding Model ── */
+// Used instead of the chat model whenever a workspace is active (see
+// routes/chat_routes.py's coding-model override, keyed off `coding_endpoint_id`
+// / `coding_model` via src.endpoint_resolver.resolve_endpoint("coding", ...)).
+async function initCodingModel() {
+  var epSel = el('set-codingEpSelect');
+  var modelSel = el('set-codingModelSelect');
+  var msg = el('set-codingChatMsg');
+  if (!epSel || !modelSel) return;
+  var _endpoints = [];
+  if (epSel.options[0]) epSel.options[0].textContent = 'Same as chat';
+  if (modelSel.options[0]) modelSel.options[0].textContent = 'Same as chat';
+
+  try {
+    _endpoints = await _fetchModelEndpoints();
+    _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
+  } catch (e) { console.warn('Failed to load endpoints for coding model', e); }
+
+  function refreshModels(selectedModel) {
+    var epId = epSel.value;
+    var ep = _endpoints.find(function(e) { return e.id === epId; });
+    _fillModelSelect(modelSel, ep ? ep.models : [], selectedModel, true);
+  }
+
+  try {
+    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    var settings = await res.json();
+    if (settings.coding_endpoint_id) epSel.value = settings.coding_endpoint_id;
+    refreshModels(settings.coding_model || '');
+  } catch (e) { console.warn('Failed to load coding model settings', e); }
+
+  async function saveCoding() {
+    try {
+      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          coding_endpoint_id: epSel.value || '',
+          coding_model: modelSel.value || ''
+        })
+      });
+      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      setTimeout(function() { msg.textContent = ''; }, 1500);
+    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+  }
+
+  epSel.addEventListener('change', function() { refreshModels(''); saveCoding(); });
+  modelSel.addEventListener('change', saveCoding);
+
+  _registerAiEndpointRefresh(function(endpoints) {
+    _endpoints = endpoints;
+    _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
+    refreshModels(modelSel.value);
+  });
+}
+
+/* ── Bash sandbox (Docker, per-workspace) ── */
+// See src/bash_sandbox.py — opt-in, only takes effect when a workspace is
+// active. Off by default; requires Docker on the host.
+async function initSandboxSettings() {
+  const toggle = el('set-sandboxEnabledToggle');
+  const imageInput = el('set-sandboxImage');
+  const msg = el('set-sandboxMsg');
+  if (!toggle) return;
+
+  try {
+    const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    const settings = await res.json();
+    toggle.checked = settings.bash_sandbox_enabled === true;
+    if (imageInput) imageInput.value = settings.bash_sandbox_image || '';
+  } catch (e) { console.warn('Failed to load sandbox settings', e); }
+
+  async function save() {
+    try {
+      const res = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bash_sandbox_enabled: toggle.checked,
+          bash_sandbox_image: imageInput ? imageInput.value.trim() : '',
+        }) });
+      if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
+      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      setTimeout(() => { msg.textContent = ''; }, 1500);
+    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+  }
+  toggle.addEventListener('change', save);
+  imageInput?.addEventListener('change', save);
+}
+
 /* ── Teacher Model ── */
 // SOTA model called automatically when a self-hosted student model
 // fails an agent-mode task. Stored as a single `teacher_model` string
@@ -747,6 +835,62 @@ async function initImageSettings() {
   const msg = el('set-imgSettingsMsg');
   const enabledToggle = el('set-imgEnabledToggle');
   const configWrap = modelSel ? modelSel.closest('div[style*="flex-direction"]') : null;
+  const backendSel = el('set-imgBackendSelect');
+  const a1111Url = el('set-imgA1111Url');
+  const sdnextUrl = el('set-imgSdnextUrl');
+  const comfyuiUrl = el('set-imgComfyuiUrl');
+  const comfyuiCkpt = el('set-imgComfyuiCkpt');
+  const a1111Model = el('set-imgA1111Model');
+  const a1111Lora = el('set-imgA1111Lora');
+  const sdnextModel = el('set-imgSdnextModel');
+  const sdnextLora = el('set-imgSdnextLora');
+  const comfyuiLora = el('set-imgComfyuiLora');
+
+  // Wires a "Refresh list" button: fetches checkpoints + LoRAs from the
+  // configured server (proxied server-side — see routes/image_backend_routes.py)
+  // and populates the paired <datalist> elements so the plain-text model/LoRA
+  // inputs get autocomplete without losing free-text entry if the server is
+  // unreachable or the name isn't in the list.
+  function wireRefresh(btnId, backendKey, ckptListId, loraListId) {
+    const btn = el(btnId);
+    if (!btn) return;
+    btn.addEventListener('click', async () => {
+      const origLabel = btn.textContent;
+      btn.disabled = true; btn.textContent = 'Loading...';
+      try {
+        const [ckptRes, loraRes] = await Promise.all([
+          fetch(`/api/image-backends/checkpoints?backend=${backendKey}`, { credentials: 'same-origin' }),
+          fetch(`/api/image-backends/loras?backend=${backendKey}`, { credentials: 'same-origin' }),
+        ]);
+        const ckptData = await ckptRes.json().catch(() => ({}));
+        const loraData = await loraRes.json().catch(() => ({}));
+        const ckptListEl = el(ckptListId);
+        const loraListEl = el(loraListId);
+        if (ckptListEl) ckptListEl.innerHTML = (ckptData.checkpoints || []).map(c => `<option value="${esc(c)}"></option>`).join('');
+        if (loraListEl) loraListEl.innerHTML = (loraData.loras || []).map(l => `<option value="${esc(l)}"></option>`).join('');
+        if (!ckptRes.ok && !loraRes.ok) throw new Error(ckptData.detail || loraData.detail || 'Failed to fetch lists');
+        if (uiModule?.showToast) uiModule.showToast('Model/LoRA list refreshed');
+      } catch (e) {
+        if (uiModule?.showError) uiModule.showError(e.message || 'Could not reach the server');
+      } finally {
+        btn.disabled = false; btn.textContent = origLabel;
+      }
+    });
+  }
+  wireRefresh('set-imgA1111Refresh', 'automatic1111', 'set-imgA1111Model-list', 'set-imgA1111Lora-list');
+  wireRefresh('set-imgSdnextRefresh', 'sdnext', 'set-imgSdnextModel-list', 'set-imgSdnextLora-list');
+  wireRefresh('set-imgComfyuiRefresh', 'comfyui', 'set-imgComfyuiCkpt-list', 'set-imgComfyuiLora-list');
+
+  function syncBackendFields() {
+    const backend = backendSel ? backendSel.value : 'openai';
+    const show = (id, on) => { const e = el(id); if (e) e.style.display = on ? '' : 'none'; };
+    show('set-imgOpenaiFields', backend === 'openai');
+    show('set-imgA1111Fields', backend === 'automatic1111');
+    show('set-imgSdnextFields', backend === 'sdnext');
+    show('set-imgComfyuiFields', backend === 'comfyui');
+  }
+  backendSel?.addEventListener('change', () => { syncBackendFields(); saveSettings(); });
+  syncBackendFields();
   try {
     const modelsRes = await fetch('/api/models', { credentials: 'same-origin' });
     const modelsData = await modelsRes.json();
@@ -780,6 +924,17 @@ async function initImageSettings() {
     if (settings.image_model) modelSel.value = settings.image_model;
     if (settings.image_quality) qualSel.value = settings.image_quality;
     if (enabledToggle) enabledToggle.checked = settings.image_gen_enabled === true;
+    if (backendSel) backendSel.value = settings.image_backend || 'openai';
+    if (a1111Url) a1111Url.value = settings.image_backend_a1111_url || '';
+    if (sdnextUrl) sdnextUrl.value = settings.image_backend_sdnext_url || '';
+    if (comfyuiUrl) comfyuiUrl.value = settings.image_backend_comfyui_url || '';
+    if (comfyuiCkpt) comfyuiCkpt.value = settings.image_backend_comfyui_checkpoint || '';
+    if (a1111Model) a1111Model.value = settings.image_backend_a1111_model || '';
+    if (a1111Lora) a1111Lora.value = settings.image_backend_a1111_lora || '';
+    if (sdnextModel) sdnextModel.value = settings.image_backend_sdnext_model || '';
+    if (sdnextLora) sdnextLora.value = settings.image_backend_sdnext_lora || '';
+    if (comfyuiLora) comfyuiLora.value = settings.image_backend_comfyui_lora || '';
+    syncBackendFields();
   } catch (e) { console.warn('Failed to load settings', e); }
 
   function syncImgDisabled() {
@@ -793,7 +948,21 @@ async function initImageSettings() {
   async function saveSettings() {
     try {
       const res = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_gen_enabled: enabledToggle ? enabledToggle.checked : false, image_model: modelSel.value, image_quality: qualSel.value }) });
+        body: JSON.stringify({
+          image_gen_enabled: enabledToggle ? enabledToggle.checked : false,
+          image_model: modelSel.value,
+          image_quality: qualSel.value,
+          image_backend: backendSel ? backendSel.value : 'openai',
+          image_backend_a1111_url: a1111Url ? a1111Url.value.trim() : '',
+          image_backend_sdnext_url: sdnextUrl ? sdnextUrl.value.trim() : '',
+          image_backend_comfyui_url: comfyuiUrl ? comfyuiUrl.value.trim() : '',
+          image_backend_comfyui_checkpoint: comfyuiCkpt ? comfyuiCkpt.value.trim() : '',
+          image_backend_a1111_model: a1111Model ? a1111Model.value.trim() : '',
+          image_backend_a1111_lora: a1111Lora ? a1111Lora.value.trim() : '',
+          image_backend_sdnext_model: sdnextModel ? sdnextModel.value.trim() : '',
+          image_backend_sdnext_lora: sdnextLora ? sdnextLora.value.trim() : '',
+          image_backend_comfyui_lora: comfyuiLora ? comfyuiLora.value.trim() : '',
+        }) });
       if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -801,6 +970,15 @@ async function initImageSettings() {
   modelSel.addEventListener('change', saveSettings);
   qualSel.addEventListener('change', saveSettings);
   if (enabledToggle) enabledToggle.addEventListener('change', function() { syncImgDisabled(); saveSettings(); });
+  a1111Url?.addEventListener('change', saveSettings);
+  sdnextUrl?.addEventListener('change', saveSettings);
+  comfyuiUrl?.addEventListener('change', saveSettings);
+  comfyuiCkpt?.addEventListener('change', saveSettings);
+  a1111Model?.addEventListener('change', saveSettings);
+  a1111Lora?.addEventListener('change', saveSettings);
+  sdnextModel?.addEventListener('change', saveSettings);
+  sdnextLora?.addEventListener('change', saveSettings);
+  comfyuiLora?.addEventListener('change', saveSettings);
 }
 
 /* ── Vision ── */
@@ -2343,6 +2521,10 @@ function initAll() {
   initEmailAccountsSettings();
   initReminderSettings();
   initUnifiedIntegrations();
+  initGithubIntegration();
+  initDiscordIntegration();
+  initCodingModel();
+  initSandboxSettings();
 }
 
 function notifyIntegrationsChanged() {
@@ -5723,6 +5905,447 @@ async function initUnifiedIntegrations() {
   }
 
   await renderList();
+}
+
+/* ── GitHub integration (clone/create repos, commit, push, PRs) — admin-only ── */
+let _githubInited = false;
+
+async function initGithubIntegration() {
+  if (_githubInited) return;
+  _githubInited = true;
+
+  const statusEl = el('github-intg-status');
+  const connectWrapEl = el('github-intg-connect-wrap');
+  const bodyEl = el('github-intg-body');
+  if (!bodyEl) return;
+
+  const params = new URLSearchParams(window.location.search);
+  const oauthErr = params.get('github_oauth_error');
+  const oauthOk = params.get('github_oauth_success');
+  let banner = '';
+  if (oauthErr) banner = `<div class="intg-followup-note" style="padding:8px 10px;margin-bottom:8px;border:1px solid color-mix(in srgb, var(--red) 40%, transparent);border-left:3px solid var(--red);border-radius:5px;background:color-mix(in srgb, var(--red) 8%, transparent);font-size:11px;">GitHub connect failed: ${esc(oauthErr)}</div>`;
+  else if (oauthOk) banner = `<div class="intg-followup-note" style="padding:8px 10px;margin-bottom:8px;border:1px solid color-mix(in srgb, var(--color-success,#50fa7b) 40%, transparent);border-left:3px solid var(--color-success,#50fa7b);border-radius:5px;background:color-mix(in srgb, var(--color-success,#50fa7b) 8%, transparent);font-size:11px;">GitHub account connected.</div>`;
+
+  async function jget(url) {
+    const r = await fetch(url, { credentials: 'same-origin' });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || `Request failed (${r.status})`);
+    return data;
+  }
+  async function jsend(method, url, body) {
+    const r = await fetch(url, {
+      method, credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || `Request failed (${r.status})`);
+    return data;
+  }
+
+  function repoCard(repo) {
+    return `<div class="intg-card" data-repo-id="${repo.id}" style="display:block;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:color-mix(in srgb, var(--fg) 3%, transparent);margin-bottom:6px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;font-weight:600">${esc(repo.full_name)} <span style="font-size:9px;text-transform:uppercase;letter-spacing:0.5px;padding:1px 5px;border:1px solid color-mix(in srgb, var(--accent, var(--red)) 50%, transparent);border-radius:3px;color:var(--accent, var(--red));background:color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);">${esc(repo.origin)}</span></div>
+          <div style="font-size:11px;opacity:0.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(repo.local_path)}">${esc(repo.local_path)}</div>
+        </div>
+        <button class="admin-btn-sm gh-repo-del" data-repo-id="${repo.id}" title="Stop tracking (keeps files on disk)" style="background:none;border:none;padding:4px;cursor:pointer;color:var(--red);opacity:0.55;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+        </button>
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;">
+        <button class="admin-btn-sm gh-repo-workspace" data-repo-id="${repo.id}" data-repo-path="${esc(repo.local_path)}">Open in Agent</button>
+        <button class="admin-btn-sm gh-repo-status" data-repo-id="${repo.id}">Status</button>
+        <button class="admin-btn-sm gh-repo-diff" data-repo-id="${repo.id}">Diff</button>
+        <button class="admin-btn-sm gh-repo-commit" data-repo-id="${repo.id}">Commit</button>
+        <button class="admin-btn-sm gh-repo-push" data-repo-id="${repo.id}">Push</button>
+        <button class="admin-btn-sm gh-repo-branch" data-repo-id="${repo.id}">New branch</button>
+        <button class="admin-btn-sm gh-repo-pr" data-repo-id="${repo.id}">Open PR</button>
+      </div>
+      <div class="gh-repo-output" data-repo-id="${repo.id}" style="display:none;margin-top:8px;font-size:11px;font-family:var(--font-mono, monospace);white-space:pre-wrap;max-height:220px;overflow:auto;background:color-mix(in srgb, var(--fg) 5%, transparent);border-radius:5px;padding:8px;"></div>
+    </div>`;
+  }
+
+  function showOutput(repoId, text) {
+    const out = bodyEl.querySelector(`.gh-repo-output[data-repo-id="${repoId}"]`);
+    if (!out) return;
+    out.style.display = '';
+    out.textContent = text;
+  }
+
+  async function renderConnected() {
+    const [repos] = await Promise.all([jget('/api/github/repos')]);
+    const list = repos.repos || [];
+    bodyEl.innerHTML = banner + `
+      <div style="display:flex;gap:6px;margin-bottom:10px;flex-wrap:wrap;">
+        <button type="button" class="admin-btn-sm" id="gh-new-repo-btn">+ New repo</button>
+        <button type="button" class="admin-btn-sm" id="gh-clone-repo-btn">+ Clone repo</button>
+        <button type="button" class="admin-btn-sm" id="gh-upload-repo-btn">+ Upload existing folder</button>
+      </div>
+      <div id="gh-inline-form" style="display:none;margin-bottom:10px;"></div>
+      <div id="gh-repo-list">${list.length ? list.map(repoCard).join('') : '<div style="padding:12px;opacity:0.5;font-size:12px;text-align:center">No repos yet — create, clone, or upload one above.</div>'}</div>
+    `;
+
+    const formWrap = el('gh-inline-form');
+    function closeForm() { formWrap.style.display = 'none'; formWrap.innerHTML = ''; }
+
+    el('gh-new-repo-btn')?.addEventListener('click', () => {
+      formWrap.style.display = '';
+      formWrap.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid var(--border);border-radius:8px;">
+          <input type="text" class="styled-prompt-input" id="gh-f-name" placeholder="repo-name" />
+          <input type="text" class="styled-prompt-input" id="gh-f-desc" placeholder="Description (optional)" />
+          <label style="font-size:11px;display:flex;align-items:center;gap:6px"><input type="checkbox" id="gh-f-private" checked /> Private</label>
+          <div style="display:flex;gap:6px;justify-content:flex-end;">
+            <button type="button" class="admin-btn-sm" id="gh-f-cancel">Cancel</button>
+            <button type="button" class="admin-btn-sm" id="gh-f-submit">Create</button>
+          </div>
+        </div>`;
+      el('gh-f-cancel').addEventListener('click', closeForm);
+      el('gh-f-submit').addEventListener('click', async () => {
+        const name = el('gh-f-name').value.trim();
+        if (!name) return;
+        try {
+          await jsend('POST', '/api/github/repos/create', {
+            name, description: el('gh-f-desc').value.trim(), private: el('gh-f-private').checked,
+          });
+          closeForm();
+          await renderConnected();
+          if (uiModule?.showToast) uiModule.showToast(`Created ${name}`);
+        } catch (e) {
+          if (uiModule?.showError) uiModule.showError(e.message);
+        }
+      });
+    });
+
+    el('gh-clone-repo-btn')?.addEventListener('click', () => {
+      formWrap.style.display = '';
+      formWrap.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid var(--border);border-radius:8px;">
+          <input type="text" class="styled-prompt-input" id="gh-f-target" placeholder="owner/repo or full GitHub URL" />
+          <input type="text" class="styled-prompt-input" id="gh-f-branch" placeholder="Branch (optional — defaults to the repo's default branch)" />
+          <div style="display:flex;gap:6px;justify-content:flex-end;">
+            <button type="button" class="admin-btn-sm" id="gh-f-cancel">Cancel</button>
+            <button type="button" class="admin-btn-sm" id="gh-f-submit">Clone</button>
+          </div>
+        </div>`;
+      el('gh-f-cancel').addEventListener('click', closeForm);
+      el('gh-f-submit').addEventListener('click', async () => {
+        const target = el('gh-f-target').value.trim();
+        if (!target) return;
+        try {
+          await jsend('POST', '/api/github/repos/clone', { full_name_or_url: target, branch: el('gh-f-branch').value.trim() || null });
+          closeForm();
+          await renderConnected();
+          if (uiModule?.showToast) uiModule.showToast(`Cloned ${target}`);
+        } catch (e) {
+          if (uiModule?.showError) uiModule.showError(e.message);
+        }
+      });
+    });
+
+    el('gh-upload-repo-btn')?.addEventListener('click', () => {
+      formWrap.style.display = '';
+      formWrap.innerHTML = `
+        <div style="display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid var(--border);border-radius:8px;">
+          <input type="text" class="styled-prompt-input" id="gh-f-path" placeholder="Local folder path on this host" />
+          <input type="text" class="styled-prompt-input" id="gh-f-name" placeholder="New repo name" />
+          <input type="text" class="styled-prompt-input" id="gh-f-desc" placeholder="Description (optional)" />
+          <label style="font-size:11px;display:flex;align-items:center;gap:6px"><input type="checkbox" id="gh-f-private" checked /> Private</label>
+          <div style="display:flex;gap:6px;justify-content:flex-end;">
+            <button type="button" class="admin-btn-sm" id="gh-f-cancel">Cancel</button>
+            <button type="button" class="admin-btn-sm" id="gh-f-submit">Create &amp; push</button>
+          </div>
+        </div>`;
+      el('gh-f-cancel').addEventListener('click', closeForm);
+      el('gh-f-submit').addEventListener('click', async () => {
+        const localPath = el('gh-f-path').value.trim();
+        const name = el('gh-f-name').value.trim();
+        if (!localPath || !name) return;
+        try {
+          await jsend('POST', '/api/github/repos/upload', {
+            local_path: localPath, name, description: el('gh-f-desc').value.trim(), private: el('gh-f-private').checked,
+          });
+          closeForm();
+          await renderConnected();
+          if (uiModule?.showToast) uiModule.showToast(`Uploaded ${localPath} as ${name}`);
+        } catch (e) {
+          if (uiModule?.showError) uiModule.showError(e.message);
+        }
+      });
+    });
+
+    bodyEl.querySelectorAll('.gh-repo-del').forEach(btn => btn.addEventListener('click', async () => {
+      const id = btn.dataset.repoId;
+      if (!await window.styledConfirm('Stop tracking this repo? (files stay on disk)', { confirmText: 'Remove' })) return;
+      try {
+        await fetch(`/api/github/repos/${id}`, { method: 'DELETE', credentials: 'same-origin' });
+        await renderConnected();
+      } catch (e) {
+        if (uiModule?.showError) uiModule.showError('Could not remove repo');
+      }
+    }));
+
+    bodyEl.querySelectorAll('.gh-repo-workspace').forEach(btn => btn.addEventListener('click', async () => {
+      const { vetAndSetWorkspace } = await import('./workspace.js');
+      const res = await vetAndSetWorkspace(btn.dataset.repoPath);
+      if (res.ok && uiModule?.showToast) uiModule.showToast('Workspace set — switch to Agent mode in chat to use it');
+      else if (uiModule?.showError) uiModule.showError('Could not set workspace');
+    }));
+
+    bodyEl.querySelectorAll('.gh-repo-status').forEach(btn => btn.addEventListener('click', async () => {
+      const id = btn.dataset.repoId;
+      try {
+        const s = await jget(`/api/github/repos/${id}/status`);
+        const ab = (s.ahead != null && s.behind != null) ? ` (ahead ${s.ahead}, behind ${s.behind})` : '';
+        showOutput(id, `branch: ${s.branch}${ab}\n${s.dirty ? 'dirty files:\n' + s.dirty_files.join('\n') : 'clean'}`);
+      } catch (e) { showOutput(id, `Error: ${e.message}`); }
+    }));
+
+    bodyEl.querySelectorAll('.gh-repo-diff').forEach(btn => btn.addEventListener('click', async () => {
+      const id = btn.dataset.repoId;
+      try {
+        const d = await jget(`/api/github/repos/${id}/diff`);
+        showOutput(id, d.diff || 'No changes');
+      } catch (e) { showOutput(id, `Error: ${e.message}`); }
+    }));
+
+    bodyEl.querySelectorAll('.gh-repo-commit').forEach(btn => btn.addEventListener('click', async () => {
+      const id = btn.dataset.repoId;
+      const message = window.prompt('Commit message:');
+      if (!message) return;
+      try {
+        const r = await jsend('POST', `/api/github/repos/${id}/commit`, { message });
+        showOutput(id, r.committed ? 'Committed.' : (r.message || 'Nothing to commit'));
+      } catch (e) { showOutput(id, `Error: ${e.message}`); }
+    }));
+
+    bodyEl.querySelectorAll('.gh-repo-push').forEach(btn => btn.addEventListener('click', async () => {
+      const id = btn.dataset.repoId;
+      try {
+        const r = await jsend('POST', `/api/github/repos/${id}/push`, {});
+        showOutput(id, `Pushed branch ${r.branch}`);
+      } catch (e) { showOutput(id, `Error: ${e.message}`); }
+    }));
+
+    bodyEl.querySelectorAll('.gh-repo-branch').forEach(btn => btn.addEventListener('click', async () => {
+      const id = btn.dataset.repoId;
+      const name = window.prompt('New branch name:');
+      if (!name) return;
+      try {
+        const r = await jsend('POST', `/api/github/repos/${id}/branch`, { name });
+        showOutput(id, `Checked out '${r.branch}'`);
+      } catch (e) { showOutput(id, `Error: ${e.message}`); }
+    }));
+
+    bodyEl.querySelectorAll('.gh-repo-pr').forEach(btn => btn.addEventListener('click', async () => {
+      const id = btn.dataset.repoId;
+      const title = window.prompt('Pull request title:');
+      if (!title) return;
+      try {
+        const r = await jsend('POST', `/api/github/repos/${id}/pr`, { title, body: '' });
+        showOutput(id, `Opened PR #${r.number}: ${r.url}`);
+      } catch (e) { showOutput(id, `Error: ${e.message}`); }
+    }));
+  }
+
+  async function render() {
+    let status;
+    try {
+      status = await jget('/api/github/status');
+    } catch (e) {
+      status = { connected: false };
+    }
+    if (status.connected) {
+      if (statusEl) statusEl.textContent = `Connected as ${status.login}`;
+      if (connectWrapEl) connectWrapEl.innerHTML = ' <button type="button" class="admin-btn-sm" id="gh-disconnect-btn">Disconnect</button>';
+      el('gh-disconnect-btn')?.addEventListener('click', async () => {
+        if (!await window.styledConfirm('Disconnect the GitHub account? Tracked repos stay on disk.', { confirmText: 'Disconnect', danger: true })) return;
+        await fetch('/api/github/disconnect', { method: 'POST', credentials: 'same-origin' });
+        await render();
+      });
+      await renderConnected();
+    } else {
+      if (statusEl) statusEl.textContent = 'Not connected';
+      if (connectWrapEl) connectWrapEl.innerHTML = ' <button type="button" class="admin-btn-sm" id="gh-connect-btn">Connect GitHub</button>';
+      bodyEl.innerHTML = banner;
+      el('gh-connect-btn')?.addEventListener('click', () => {
+        window.location.href = '/api/github/oauth/authorize';
+      });
+    }
+  }
+
+  await render();
+}
+
+/* ── Discord bot integration (message history, members/presence, send) — admin-only ── */
+let _discordInited = false;
+
+async function initDiscordIntegration() {
+  if (_discordInited) return;
+  _discordInited = true;
+
+  const statusEl = el('discord-intg-status');
+  const bodyEl = el('discord-intg-body');
+  if (!bodyEl) return;
+
+  async function jget(url) {
+    const r = await fetch(url, { credentials: 'same-origin' });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || `Request failed (${r.status})`);
+    return data;
+  }
+  async function jsend(method, url, body) {
+    const r = await fetch(url, {
+      method, credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data.detail || `Request failed (${r.status})`);
+    return data;
+  }
+
+  function renderConfigForm(status) {
+    return `
+      <div style="display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid var(--border);border-radius:8px;margin-bottom:10px;">
+        ${!status.installed ? `<div style="font-size:11px;opacity:0.7">discord.py is not installed. Add it from requirements-optional.txt and restart Odysseus to enable this.</div>` : ''}
+        <input type="password" class="styled-prompt-input" id="dc-f-token" placeholder="${status.configured ? 'Bot token (leave blank to keep the current one)' : 'Bot token'}" />
+        <input type="text" class="styled-prompt-input" id="dc-f-guild" placeholder="Default guild (server) ID — optional" />
+        <div style="display:flex;gap:6px;justify-content:flex-end;">
+          ${status.configured ? '<button type="button" class="admin-btn-sm" id="dc-f-disconnect">Disconnect</button>' : ''}
+          <button type="button" class="admin-btn-sm" id="dc-f-save">${status.configured ? 'Save & reconnect' : 'Connect'}</button>
+        </div>
+      </div>`;
+  }
+
+  function memberRow(m) {
+    const dot = { online: '#50fa7b', idle: '#f1c40f', dnd: '#e74c3c' }[m.status] || 'var(--fg)';
+    const dotOpacity = m.status && m.status !== 'offline' ? '1' : '0.25';
+    return `<div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px;">
+      <span style="width:7px;height:7px;border-radius:50%;background:${dot};opacity:${dotOpacity};flex-shrink:0"></span>
+      <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(m.display_name || m.name)}</span>
+      <span style="opacity:0.5;font-size:10px;text-transform:uppercase">${esc(m.status || 'offline')}</span>
+    </div>`;
+  }
+
+  async function renderConnected() {
+    let guilds;
+    try {
+      guilds = (await jget('/api/discord/guilds')).guilds || [];
+    } catch (e) {
+      bodyEl.innerHTML = renderConfigForm(await jget('/api/discord/status')) +
+        `<div style="padding:8px;font-size:11px;opacity:0.6">${esc(e.message)}</div>`;
+      bindConfigForm();
+      return;
+    }
+    const guildOptions = guilds.map(g => `<option value="${g.id}">${esc(g.name)} (${g.member_count})</option>`).join('');
+    bodyEl.innerHTML = renderConfigForm(await jget('/api/discord/status')) + `
+      <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;">
+        <select class="styled-prompt-input" id="dc-guild-select" style="flex:1">${guildOptions || '<option>No guilds — invite the bot to a server</option>'}</select>
+        <button type="button" class="admin-btn-sm" id="dc-refresh-btn">Refresh</button>
+      </div>
+      <div id="dc-guild-summary" style="font-size:12px;opacity:0.8;margin-bottom:8px;"></div>
+      <div style="display:flex;gap:6px;margin-bottom:8px;flex-wrap:wrap;">
+        <input type="text" class="styled-prompt-input" id="dc-search-query" placeholder="Search message history..." style="flex:1;min-width:160px;" />
+        <button type="button" class="admin-btn-sm" id="dc-search-btn">Search</button>
+      </div>
+      <div id="dc-search-results" style="font-size:11px;font-family:var(--font-mono, monospace);white-space:pre-wrap;max-height:180px;overflow:auto;background:color-mix(in srgb, var(--fg) 5%, transparent);border-radius:5px;padding:8px;margin-bottom:10px;display:none;"></div>
+      <div style="display:flex;gap:6px;margin-bottom:8px;">
+        <button type="button" class="admin-btn-sm" id="dc-members-btn">Show members</button>
+      </div>
+      <div id="dc-members-list" style="max-height:220px;overflow:auto;margin-bottom:10px;"></div>
+    `;
+    bindConfigForm();
+
+    const guildSelect = el('dc-guild-select');
+
+    async function loadSummary() {
+      const gid = guildSelect?.value;
+      if (!gid) return;
+      try {
+        const s = await jget(`/api/discord/guilds/${gid}/summary`);
+        el('dc-guild-summary').textContent =
+          `${s.member_count} members — ${s.online} online, ${s.idle} idle, ${s.dnd} dnd, ${s.offline} offline`;
+      } catch (e) {
+        el('dc-guild-summary').textContent = e.message;
+      }
+    }
+    guildSelect?.addEventListener('change', loadSummary);
+    el('dc-refresh-btn')?.addEventListener('click', renderConnected);
+    if (guilds.length) await loadSummary();
+
+    el('dc-members-btn')?.addEventListener('click', async () => {
+      const gid = guildSelect?.value;
+      if (!gid) return;
+      const listEl = el('dc-members-list');
+      try {
+        const { members } = await jget(`/api/discord/guilds/${gid}/members`);
+        listEl.innerHTML = members.map(memberRow).join('') || '<div style="opacity:0.5;font-size:12px">No members</div>';
+      } catch (e) {
+        listEl.innerHTML = `<div style="opacity:0.6;font-size:11px">${esc(e.message)}</div>`;
+      }
+    });
+
+    el('dc-search-btn')?.addEventListener('click', async () => {
+      const gid = guildSelect?.value;
+      const query = el('dc-search-query').value.trim();
+      const outEl = el('dc-search-results');
+      outEl.style.display = '';
+      outEl.textContent = 'Searching...';
+      try {
+        const { messages } = await jget(`/api/discord/messages/search?guild_id=${encodeURIComponent(gid || '')}&query=${encodeURIComponent(query)}`);
+        outEl.textContent = messages.length
+          ? messages.map(m => `#${m.channel} — ${m.author} (${m.timestamp}):\n${m.content}`).join('\n\n')
+          : 'No matches';
+      } catch (e) {
+        outEl.textContent = `Error: ${e.message}`;
+      }
+    });
+  }
+
+  function bindConfigForm() {
+    el('dc-f-save')?.addEventListener('click', async () => {
+      const token = el('dc-f-token').value.trim();
+      const guild = el('dc-f-guild').value.trim();
+      try {
+        await jsend('POST', '/api/discord/config', { bot_token: token || null, default_guild_id: guild || null, enabled: true });
+        if (uiModule?.showToast) uiModule.showToast('Discord bot configuration saved');
+        await render();
+      } catch (e) {
+        if (uiModule?.showError) uiModule.showError(e.message);
+      }
+    });
+    el('dc-f-disconnect')?.addEventListener('click', async () => {
+      if (!await window.styledConfirm('Disconnect the Discord bot?', { confirmText: 'Disconnect', danger: true })) return;
+      await fetch('/api/discord/disconnect', { method: 'POST', credentials: 'same-origin' });
+      await render();
+    });
+  }
+
+  async function render() {
+    let status;
+    try {
+      status = await jget('/api/discord/status');
+    } catch (e) {
+      status = { installed: false, configured: false, enabled: false, connected: false };
+    }
+    if (statusEl) {
+      statusEl.textContent = !status.installed ? 'Not installed'
+        : status.connected ? `Connected as ${status.bot_user}`
+        : status.configured ? (status.error || 'Configured, not connected')
+        : 'Not configured';
+    }
+    if (status.connected) {
+      await renderConnected();
+    } else {
+      bodyEl.innerHTML = renderConfigForm(status);
+      bindConfigForm();
+    }
+  }
+
+  await render();
 }
 
 /* ── Admin visibility sync ── */

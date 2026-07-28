@@ -61,6 +61,28 @@ INTEGRATION_PRESETS: Dict[str, Dict[str, Any]] = {
             "  GET /api/v1/repos/{owner}/{repo}/contents/{filepath} — get file content"
         ),
     },
+    "github": {
+        "name": "GitHub",
+        "auth_type": "header",
+        "auth_header": "Authorization",
+        "description": (
+            "GitHub REST API (v3). Auth header value format: 'Bearer YOUR_PERSONAL_ACCESS_TOKEN'.\n"
+            "For full clone/create-repo/commit/push/PR workflows use Settings > Integrations > GitHub\n"
+            "(OAuth App connect) instead — this preset is for quick read/write API calls only. Key endpoints:\n"
+            "  GET /user — get authenticated user\n"
+            "  GET /user/repos — list repositories for the authenticated user\n"
+            "  GET /orgs/{org}/repos — list organization repositories\n"
+            "  GET /repos/{owner}/{repo} — get repository details\n"
+            "  POST /user/repos — create a new repository {\"name\": \"...\", \"private\": true}\n"
+            "  GET /repos/{owner}/{repo}/contents/{path} — get file or directory contents\n"
+            "  PUT /repos/{owner}/{repo}/contents/{path} — create or update a file\n"
+            "  GET /repos/{owner}/{repo}/pulls — list pull requests\n"
+            "  POST /repos/{owner}/{repo}/pulls — create a pull request {\"title\":\"...\",\"head\":\"...\",\"base\":\"main\"}\n"
+            "  GET /repos/{owner}/{repo}/issues — list issues\n"
+            "  POST /repos/{owner}/{repo}/issues — create an issue {\"title\": \"...\"}\n"
+            "  PATCH /repos/{owner}/{repo}/issues/{number} — update an issue"
+        ),
+    },
     "linkding": {
         "name": "Linkding",
         "auth_type": "header",
@@ -436,6 +458,7 @@ async def execute_api_call(
                 "miniflux": "X-Auth-Token",
                 "linkding": "Authorization",
                 "gitea": "Authorization",
+                "github": "Authorization",
             }
             header_name = header_defaults.get(preset, "Authorization")
         headers[header_name] = api_key
