@@ -317,6 +317,30 @@ entire existing tool suite rather than building a parallel one.
     if Claude Code calls more than one tool in a single assistant message,
     only the last tool's bubble reliably pairs with its output (cosmetic;
     Odysseus's own tool-thread UI tracks one "current" bubble at a time).
+  - **Critical fix**: the coding-agent path was silently running Claude Code
+    with NO tools at all on every real turn — always the plain-chat branch
+    (`--allowedTools ""`), never the workspace one — even when a GitHub
+    workspace was genuinely active. Root cause: `_stream_cli_provider`
+    (`src/llm_core.py`) read the workspace path from
+    `src.tool_execution.get_active_workspace()`, a contextvar that's ONLY
+    bound for the duration of Odysseus's own `execute_tool_block()` calls —
+    i.e. AFTER the model has already responded — so it was always `None`
+    during the LLM call itself. Every Write/Bash attempt was denied every
+    single time, and the model (per its normal interactive training)
+    narrated each denial as "please approve it in your Claude Code UI",
+    creating a repeating, unresolvable-looking stuck loop that had nothing
+    to do with permission-mode flags (`bypassPermissions` was already
+    correct; there was just no workspace for it to apply to). Fixed by
+    threading `workspace` as an explicit parameter through
+    `stream_llm_with_fallback` → `stream_llm` → `_stream_llm_inner` →
+    `_stream_cli_provider` instead — `agent_loop.py`'s `stream_agent_loop`
+    already receives the real workspace path as a function argument, so
+    both of its `stream_llm_with_fallback(...)` call sites now pass
+    `workspace=workspace` directly rather than relying on ambient state.
+    Verified end-to-end by reproducing the exact CLI invocation manually in
+    the container (same flags, same repo) — file write + git commit
+    succeeded cleanly with `"permission_denials":[]`, confirming the CLI
+    and flags were never the problem.
 
 ## 5. VRChat Integration ("VRCX-like")
 

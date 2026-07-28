@@ -2149,7 +2149,8 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                      tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                     tool_choice_none: bool = False, workload: str = "foreground"):
+                     tool_choice_none: bool = False, workload: str = "foreground",
+                     workspace: Optional[str] = None):
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
         async for chunk in _stream_llm_inner(
@@ -2164,11 +2165,13 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             tools=tools,
             session_id=session_id,
             tool_choice_none=tool_choice_none,
+            workspace=workspace,
         ):
             yield chunk
 
 
-async def _stream_cli_provider(provider: str, model: str, messages: List[Dict], session_id: Optional[str]):
+async def _stream_cli_provider(provider: str, model: str, messages: List[Dict], session_id: Optional[str],
+                                workspace: Optional[str] = None):
     """Shared driver for the claude-cli / codex-cli subprocess providers.
 
     Both run a real CLI binary out-of-process (see src/claude_cli.py and
@@ -2177,10 +2180,15 @@ async def _stream_cli_provider(provider: str, model: str, messages: List[Dict], 
     the rest of llm_core/agent_loop already understand, and persists whatever
     resume/session id the CLI reports so the next turn in the same workspace
     can continue the same underlying conversation instead of starting cold.
-    """
-    from src.tool_execution import get_active_workspace
-    workspace = get_active_workspace()
 
+    `workspace` MUST be passed in explicitly by the caller, not read from
+    src.tool_execution's active-workspace contextvar — that contextvar is
+    only bound for the duration of Odysseus's own tool_execution calls (see
+    execute_tool_block), which happens AFTER the model has already responded.
+    Reading it here, during the LLM call itself, always saw None — silently
+    falling back to plain-chat mode (no tools at all) even for a genuine
+    coding-agent turn, which looks identical to every tool call being denied.
+    """
     if provider == "claude-cli":
         from src.claude_cli import stream_claude_cli, get_resume_session_id, save_resume_session_id
         stream_fn = stream_claude_cli
@@ -2230,7 +2238,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                             timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                             tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                            tool_choice_none: bool = False):
+                            tool_choice_none: bool = False, workspace: Optional[str] = None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -2259,7 +2267,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     # ── Claude Code CLI / Codex CLI: no HTTP request at all — shell out to the
     # real CLI binary and translate its own event stream into this vocabulary.
     if provider in ("claude-cli", "codex-cli"):
-        async for chunk in _stream_cli_provider(provider, model, messages_copy, session_id):
+        async for chunk in _stream_cli_provider(provider, model, messages_copy, session_id, workspace):
             yield chunk
         return
 

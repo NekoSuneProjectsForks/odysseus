@@ -3240,6 +3240,7 @@ async def stream_agent_loop(
                 timeout=int(get_setting("agent_stream_timeout_seconds", 300) or 300),
                 session_id=session_id,
                 workload=workload,
+                workspace=workspace,
             ):
                 if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                     try:
@@ -3980,6 +3981,7 @@ async def stream_agent_loop(
             timeout=agent_stream_timeout,
             session_id=session_id,
             workload=workload,
+            workspace=workspace,
         ):
             if not _round_first_event_logged:
                 _round_first_event_logged = True
