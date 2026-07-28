@@ -114,17 +114,22 @@ def build_claude_cli_args(
         args += ["--append-system-prompt", system_prompt]
     if workspace:
         # Coding-agent mode: `workspace` is already a single Odysseus-confined
-        # folder — let Claude Code use its own file/bash tools scoped to that
-        # same cwd. `acceptEdits` only auto-approves file-EDIT diffs, not Bash
-        # commands or new-file Write calls — those still pause for a
-        # permission prompt that no terminal is attached to answer, and the
-        # model then asks the user to "approve it in your Claude Code UI"
-        # (no such thing exists here), stalling forever. `--allowedTools`
-        # above is the actual security boundary (a curated, workspace-scoped
-        # tool set — the same trust level Odysseus's own native tools already
-        # get inside a vetted workspace), so bypass the redundant prompt step
-        # entirely for this genuinely non-interactive run.
-        args += ["--allowedTools", "Bash,Read,Edit,Write,Glob,Grep", "--permission-mode", "bypassPermissions"]
+        # folder — let Claude Code use its own tools scoped to that same cwd.
+        #
+        # Deliberately NOT passing --allowedTools here. It's a hard allowlist
+        # that blocks anything not named in it regardless of permission-mode
+        # — an earlier version restricted it to Bash/Read/Edit/Write/Glob/Grep,
+        # but Claude Code also reaches for other built-ins during normal
+        # agentic coding (TodoWrite for its internal task tracking, etc.), and
+        # a call to any tool outside the list is silently denied. The model
+        # then narrates that denial as "please approve it in your Claude Code
+        # UI" (its trained response to any tool denial, interactive or not) —
+        # except no such prompt exists here, so it stalls forever repeating
+        # the request. `--permission-mode bypassPermissions` below is the
+        # actual behavior we want (never pause for approval); the workspace
+        # cwd confinement is the security boundary, the same trust level
+        # Odysseus's own native tools already get inside a vetted workspace.
+        args += ["--permission-mode", "bypassPermissions"]
     else:
         # Plain-chat mode: Odysseus's own agent loop (and its own tool
         # security/sandboxing) is what should execute tools, not a second,
