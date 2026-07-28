@@ -115,9 +115,16 @@ def build_claude_cli_args(
     if workspace:
         # Coding-agent mode: `workspace` is already a single Odysseus-confined
         # folder — let Claude Code use its own file/bash tools scoped to that
-        # same cwd, auto-accepting edits since there is no terminal attached
-        # to approve them from.
-        args += ["--allowedTools", "Bash,Read,Edit,Write,Glob,Grep", "--permission-mode", "acceptEdits"]
+        # same cwd. `acceptEdits` only auto-approves file-EDIT diffs, not Bash
+        # commands or new-file Write calls — those still pause for a
+        # permission prompt that no terminal is attached to answer, and the
+        # model then asks the user to "approve it in your Claude Code UI"
+        # (no such thing exists here), stalling forever. `--allowedTools`
+        # above is the actual security boundary (a curated, workspace-scoped
+        # tool set — the same trust level Odysseus's own native tools already
+        # get inside a vetted workspace), so bypass the redundant prompt step
+        # entirely for this genuinely non-interactive run.
+        args += ["--allowedTools", "Bash,Read,Edit,Write,Glob,Grep", "--permission-mode", "bypassPermissions"]
     else:
         # Plain-chat mode: Odysseus's own agent loop (and its own tool
         # security/sandboxing) is what should execute tools, not a second,
