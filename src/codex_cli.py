@@ -41,6 +41,13 @@ CODEX_CLI_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"]
 
 DEFAULT_CODEX_CLI_TIMEOUT = int(os.getenv("CODEX_CLI_TIMEOUT", "600") or "600")
 
+# asyncio's default StreamReader line-buffer limit is 64 KiB. Codex puts one
+# whole completed item (e.g. a full file being written/edited, or large bash
+# output) on a single --json line, which routinely exceeds that in
+# coding-agent mode and raises LimitOverrunError — crashing the entire agent
+# run instead of just this turn. Give the pipe a much larger ceiling.
+_STDOUT_BUFFER_LIMIT = 64 * 1024 * 1024
+
 
 def is_codex_cli_base(url: str) -> bool:
     try:
@@ -199,6 +206,7 @@ async def stream_codex_cli(
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=_STDOUT_BUFFER_LIMIT,
         )
     except Exception as e:
         yield {"type": "error", "message": f"Failed to start Codex CLI: {e}"}
@@ -210,7 +218,15 @@ async def stream_codex_cli(
     try:
         assert proc.stdout is not None
         while True:
-            line = await proc.stdout.readline()
+            try:
+                line = await proc.stdout.readline()
+            except ValueError:
+                # A single line still exceeded _STDOUT_BUFFER_LIMIT
+                # (LimitOverrunError, a ValueError subclass) — the stream is
+                # unrecoverable at that point, so end the turn gracefully
+                # instead of crashing the whole agent run.
+                yield {"type": "error", "message": "Codex CLI output exceeded the buffer limit for a single event."}
+                return
             if not line:
                 break
             text = line.decode("utf-8", errors="replace").strip()

@@ -37,6 +37,13 @@ CLAUDE_CLI_MODELS = ["sonnet", "opus", "haiku", "opusplan"]
 
 DEFAULT_CLAUDE_CLI_TIMEOUT = int(os.getenv("CLAUDE_CLI_TIMEOUT", "600") or "600")
 
+# asyncio's default StreamReader line-buffer limit is 64 KiB. Claude Code puts
+# one whole tool call (e.g. a full file being written/edited, or large bash
+# output) on a single stream-json line, which routinely exceeds that in
+# coding-agent mode and raises LimitOverrunError — crashing the entire agent
+# run instead of just this turn. Give the pipe a much larger ceiling.
+_STDOUT_BUFFER_LIMIT = 64 * 1024 * 1024
+
 
 def is_claude_cli_base(url: str) -> bool:
     try:
@@ -199,6 +206,7 @@ async def stream_claude_cli(
             cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=_STDOUT_BUFFER_LIMIT,
         )
     except Exception as e:
         yield {"type": "error", "message": f"Failed to start Claude Code CLI: {e}"}
@@ -210,7 +218,15 @@ async def stream_claude_cli(
     try:
         assert proc.stdout is not None
         while True:
-            line = await proc.stdout.readline()
+            try:
+                line = await proc.stdout.readline()
+            except ValueError:
+                # A single line still exceeded _STDOUT_BUFFER_LIMIT
+                # (LimitOverrunError, a ValueError subclass) — the stream is
+                # unrecoverable at that point, so end the turn gracefully
+                # instead of crashing the whole agent run.
+                yield {"type": "error", "message": "Claude Code CLI output exceeded the buffer limit for a single event."}
+                return
             if not line:
                 break
             text = line.decode("utf-8", errors="replace").strip()
