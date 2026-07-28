@@ -4080,6 +4080,14 @@ async def stream_agent_loop(
                         actual_model = data.get("model") or actual_model
                         data["requested_model"] = requested_model
                         yield f"data: {json.dumps(data)}\n\n"
+                    elif data.get("type") in ("tool_start", "tool_output"):
+                        # Progress feedback from a subprocess-CLI provider's
+                        # OWN tool loop (claude-cli/codex-cli — see
+                        # src/llm_core.py's _stream_cli_provider). Not
+                        # Odysseus's own tool_execution (no native_tool_calls
+                        # to run here), just forwarded so the chat UI shows
+                        # what it's doing instead of one long silent wait.
+                        yield chunk
                     elif "delta" in data:
                         if not first_token_received:
                             time_to_first_token = time.time() - total_start

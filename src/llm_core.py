@@ -2208,6 +2208,10 @@ async def _stream_cli_provider(provider: str, model: str, messages: List[Dict], 
                     return
             if text:
                 yield _stream_delta_event(text, thinking=thinking)
+        elif etype == "tool_start":
+            yield f'data: {json.dumps({"type": "tool_start", "tool": event.get("tool") or "tool", "command": event.get("command") or ""})}\n\n'
+        elif etype == "tool_output":
+            yield f'data: {json.dumps({"type": "tool_output", "tool": event.get("tool") or "tool", "command": event.get("command") or "", "output": event.get("output") or ""})}\n\n'
         elif etype == "usage":
             saw_usage = True
             input_tokens = event.get("input_tokens", 0) or input_tokens

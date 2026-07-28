@@ -127,7 +127,38 @@ def build_claude_cli_args(
     return args
 
 
-def _translate_claude_cli_event(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _format_tool_command(name: str, tool_input: Dict[str, Any]) -> str:
+    """Best-effort one-line summary of a tool call's input for the UI's
+    tool_start bubble — mirrors the display Odysseus's own bash/read/write/
+    edit tools already produce, so the two look consistent in the timeline."""
+    if not isinstance(tool_input, dict):
+        return ""
+    if name == "Bash":
+        return str(tool_input.get("command") or "")
+    if name in ("Read", "Write", "Edit"):
+        return str(tool_input.get("file_path") or tool_input.get("path") or "")
+    if name in ("Glob", "Grep"):
+        return str(tool_input.get("pattern") or "")
+    for v in tool_input.values():
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
+def _stringify_tool_result_content(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        return "\n".join(p for p in parts if p)
+    return str(content) if content is not None else ""
+
+
+def _translate_claude_cli_event(obj: Dict[str, Any], tool_names: Dict[str, str]) -> List[Dict[str, Any]]:
+    """`tool_names` is a per-stream id->name map the caller keeps alive across
+    calls, so a later tool_result (`user` message) can be paired back up with
+    the tool_use (`assistant` message) that started it — Claude Code reports
+    those as two separate whole messages, not one paired event."""
     events: List[Dict[str, Any]] = []
     t = obj.get("type")
     if t == "system" and obj.get("subtype") == "init":
@@ -142,6 +173,33 @@ def _translate_claude_cli_event(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
                 events.append({"type": "delta", "text": delta["text"], "thinking": False})
             elif delta.get("type") == "thinking_delta" and delta.get("thinking"):
                 events.append({"type": "delta", "text": delta["thinking"], "thinking": True})
+    elif t == "assistant":
+        # Whole-message tool_use blocks — Claude Code's own tool loop, distinct
+        # from Odysseus's tool schemas, so this is progress feedback only
+        # (never dispatched through Odysseus's tool_execution).
+        message = obj.get("message") or {}
+        for block in message.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                name = block.get("name") or "tool"
+                block_id = block.get("id")
+                if block_id:
+                    tool_names[block_id] = name
+                events.append({
+                    "type": "tool_start",
+                    "tool": name,
+                    "command": _format_tool_command(name, block.get("input") or {}),
+                })
+    elif t == "user":
+        message = obj.get("message") or {}
+        content = message.get("content")
+        for block in (content if isinstance(content, list) else []):
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                name = tool_names.get(block.get("tool_use_id"), "tool")
+                events.append({
+                    "type": "tool_output",
+                    "tool": name,
+                    "output": _stringify_tool_result_content(block.get("content"))[:2000],
+                })
     elif t == "result":
         sid = obj.get("session_id")
         if sid:
@@ -168,6 +226,8 @@ async def stream_claude_cli(
 ) -> AsyncIterator[Dict[str, Any]]:
     """Run `claude -p ...` and yield normalized events:
         {"type": "delta", "text": str, "thinking": bool}
+        {"type": "tool_start", "tool": str, "command": str}
+        {"type": "tool_output", "tool": str, "output": str}
         {"type": "session_id", "id": str}
         {"type": "usage", "input_tokens": int, "output_tokens": int}
         {"type": "error", "message": str}
@@ -215,6 +275,7 @@ async def stream_claude_cli(
     saw_recognized_event = False
     unrecognized_snippet = ""
     errored = False
+    tool_names: Dict[str, str] = {}
     try:
         assert proc.stdout is not None
         while True:
@@ -242,7 +303,7 @@ async def stream_claude_cli(
                 if len(unrecognized_snippet) < 500:
                     unrecognized_snippet += text + "\n"
                 continue
-            for event in _translate_claude_cli_event(obj):
+            for event in _translate_claude_cli_event(obj, tool_names):
                 saw_recognized_event = True
                 if event.get("type") == "error":
                     errored = True

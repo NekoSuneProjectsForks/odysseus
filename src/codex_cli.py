@@ -125,6 +125,21 @@ def build_codex_cli_args(
     return args
 
 
+_CODEX_TEXT_ITEM_TYPES = ("agent_message", "reasoning")
+
+
+def _format_codex_item_command(item: Dict[str, Any]) -> str:
+    """Best-effort one-line summary of a command_execution/file_change/
+    mcp_tool_call/web_search item for the UI's tool_start/tool_output bubble.
+    Codex's exact per-item-type field names aren't fully documented, so this
+    is deliberately generic rather than hardcoded per type."""
+    for key in ("command", "path", "query", "name", "title"):
+        v = item.get(key)
+        if isinstance(v, str) and v:
+            return v
+    return ""
+
+
 def _translate_codex_cli_event(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     t = obj.get("type")
@@ -132,6 +147,18 @@ def _translate_codex_cli_event(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
         tid = obj.get("thread_id")
         if tid:
             events.append({"type": "session_id", "id": tid})
+    elif t == "item.started":
+        item = obj.get("item") or {}
+        item_type = item.get("type")
+        if item_type and item_type not in _CODEX_TEXT_ITEM_TYPES:
+            # command_execution / file_change / mcp_tool_call / web_search /
+            # plan_update — Codex's own tool loop, distinct from Odysseus's
+            # tool schemas, so this is progress feedback only.
+            events.append({
+                "type": "tool_start",
+                "tool": item_type,
+                "command": _format_codex_item_command(item),
+            })
     elif t == "item.completed":
         item = obj.get("item") or {}
         item_type = item.get("type")
@@ -140,6 +167,15 @@ def _translate_codex_cli_event(obj: Dict[str, Any]) -> List[Dict[str, Any]]:
             events.append({"type": "delta", "text": text, "thinking": False})
         elif item_type == "reasoning" and text:
             events.append({"type": "delta", "text": text, "thinking": True})
+        elif item_type:
+            output = item.get("output") or item.get("result") or item.get("aggregated_output") or ""
+            if not isinstance(output, str):
+                output = str(output)
+            events.append({
+                "type": "tool_output",
+                "tool": item_type,
+                "output": (output or _format_codex_item_command(item))[:2000],
+            })
     elif t == "turn.completed":
         usage = obj.get("usage") or {}
         if usage:
@@ -168,6 +204,8 @@ async def stream_codex_cli(
 ) -> AsyncIterator[Dict[str, Any]]:
     """Run `codex exec ... --json` and yield normalized events:
         {"type": "delta", "text": str, "thinking": bool}
+        {"type": "tool_start", "tool": str, "command": str}
+        {"type": "tool_output", "tool": str, "output": str}
         {"type": "session_id", "id": str}
         {"type": "usage", "input_tokens": int, "output_tokens": int}
         {"type": "error", "message": str}

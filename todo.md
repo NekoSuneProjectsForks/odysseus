@@ -275,7 +275,9 @@ entire existing tool suite rather than building a parallel one.
     persists via its own bind mount (`CLAUDE_CONFIG_HOST_DIR` →
     `/app/.claude`, `CODEX_CONFIG_HOST_DIR` → `/app/.codex`, matching the
     container's `HOME=/app`) across all three compose files. One-time setup
-    is `docker compose exec odysseus claude login` / `codex login` — see
+    is `docker compose exec --user odysseus odysseus claude login` / `codex
+    login` — `--user` matters, a bare `exec` runs as root (HOME=/root),
+    logging in under a home directory the running app never reads. See
     `.env.example`.
   - UI: "Claude Code CLI" / "Codex CLI" entries in the Add Model provider
     picker (`static/index.html`, `static/js/admin.js`) — picking one locks
@@ -290,6 +292,31 @@ entire existing tool suite rather than building a parallel one.
     so Codex CLI responses currently arrive in one chunk instead of
     streaming character-by-character. Functionally fine, just a coarser
     streaming experience than the other providers.
+  - Fixed post-ship: `asyncio`'s default subprocess stdout line-buffer limit
+    (64 KiB) was too small once real tool use was involved — Claude Code /
+    Codex put a whole tool call (e.g. a full file write, big bash output) on
+    one JSON line, and an unhandled `LimitOverrunError` crashed the entire
+    agent run ("Agent run failed before completion"). Raised to 64 MiB in
+    both `claude_cli.py`/`codex_cli.py`, with a graceful fallback if a line
+    still somehow exceeds it. Also fixed a frontend bug where several
+    providers' string-shaped SSE error payloads (`{"error": "<string>"}`,
+    not `{"error": {"message": ...}}`) collapsed to a generic "Error 502"
+    instead of the real message (`static/js/chat.js`).
+  - Tool-use progress feedback — built, so coding-agent turns don't read as
+    one long silent wait. Claude Code reports tool calls as whole
+    `assistant`/`user` messages (tool_use / tool_result content blocks);
+    Codex reports them as `item.started`/`item.completed` events
+    (`command_execution`/`file_change`/`mcp_tool_call`/`web_search`/
+    `plan_update`). Both are translated into Odysseus's existing
+    `tool_start`/`tool_output` SSE vocabulary — the SAME one its own agent
+    loop already uses — so the chat UI's tool-thread timeline (the
+    expandable "ran `git status`" bubbles) works for these providers with no
+    frontend changes. Required one small `agent_loop.py` fix: the main
+    round-dispatch loop had no catch-all for unrecognized SSE `"type"`
+    values, so these would otherwise be silently dropped. Known limitation:
+    if Claude Code calls more than one tool in a single assistant message,
+    only the last tool's bubble reliably pairs with its output (cosmetic;
+    Odysseus's own tool-thread UI tracks one "current" bubble at a time).
 
 ## 5. VRChat Integration ("VRCX-like")
 
