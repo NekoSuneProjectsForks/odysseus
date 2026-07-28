@@ -25,12 +25,29 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Docker/OCI image refs must be all-lowercase; github.repository preserves
+  # the owner/repo casing as-is (fine for odysseus-dev/odysseus upstream,
+  # breaks on any fork whose owner or repo name has uppercase letters).
+  # Compute it once here and share it via job outputs instead of repeating
+  # the lowercasing in every downstream job.
+  prep:
+    name: prep
+    runs-on: ubuntu-latest
+    outputs:
+      image_name: ${{ steps.lc.outputs.name }}
+    steps:
+      - name: Lowercase image name
+        id: lc
+        run: echo "name=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
   build:
     name: build (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    needs: prep
+    env:
+      IMAGE_NAME: ${{ needs.prep.outputs.image_name }}
     permissions:
       contents: read
       packages: write
@@ -81,7 +98,9 @@ jobs:
   merge:
     name: merge manifest + tag
     runs-on: ubuntu-latest
-    needs: build
+    needs: [prep, build]
+    env:
+      IMAGE_NAME: ${{ needs.prep.outputs.image_name }}
     permissions:
       contents: read
       packages: write
