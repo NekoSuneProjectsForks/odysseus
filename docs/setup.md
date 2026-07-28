@@ -25,7 +25,7 @@ cd odysseus
 cp .env.example .env       # optional, but recommended for explicit defaults
 docker compose up -d --build
 ```
-To include optional extras in the image (PDF viewer, Office extraction; includes AGPL PyMuPDF), build with `docker compose build --build-arg INSTALL_OPTIONAL=true` before `up`.
+Optional extras (PDF viewer, Office extraction, Discord bot, Claude Code CLI, Codex CLI; includes AGPL PyMuPDF) build in by default. For a smaller, MIT-only-core image without them, set `INSTALL_OPTIONAL=false` in `.env` (or `docker compose build --build-arg INSTALL_OPTIONAL=false`) before `up`.
 
 Open `http://localhost:7000` when the containers are healthy. Docker Compose
 binds the web UI to `127.0.0.1` by default. If the port is taken, set

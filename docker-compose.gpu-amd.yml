@@ -16,10 +16,11 @@ services:
       context: .
       args:
         # Optional deps (requirements-optional.txt): local STT, DDG search,
-        # PDF form-filling, Office/EPUB doc conversion, and the Discord bot
-        # integration (discord.py). Off by default to keep the base image
-        # MIT-core; set INSTALL_OPTIONAL=true in your .env to build them in.
-        INSTALL_OPTIONAL: ${INSTALL_OPTIONAL:-false}
+        # PDF form-filling (PyMuPDF, AGPL — see ACKNOWLEDGMENTS.md), Office/EPUB
+        # doc conversion, the Discord bot integration (discord.py), and the
+        # Claude Code CLI / Codex CLI. On by default; set INSTALL_OPTIONAL=false
+        # in your .env for a smaller, MIT-only-core image.
+        INSTALL_OPTIONAL: ${INSTALL_OPTIONAL:-true}
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
     volumes:
